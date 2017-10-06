@@ -1,90 +1,157 @@
-import time
-import cv2
+#!/usr/bin/python
+# -*- coding:utf-8 -*-
 import numpy as np
 from PIL import ImageFont
 from PIL import Image
 from PIL import ImageDraw
 import json
 
-import sys
+import cv2
 
-fontC = ImageFont.truetype("platech.ttf", 14, 0);
 
-def SimpleRecognizePlate(image):
-    t0 = time.time()
-    images = detectPlateRough(image,image.shape[0],top_bottom_padding_rate=0.1) # 车牌的粗定位
-    res_set = []
-    for j,plate in enumerate(images):
-        plate, rect, origin_plate  = plate
-        # plate = cv2.cvtColor(plate, cv2.COLOR_RGB2GRAY)
-        plate  =cv2.resize(plate,(136,36*2))
-        t1 = time.time()
+# pipline
+fontC = ImageFont.truetype("platech.ttf", 14, 0)
 
-        ptype = td_SimplePredict(plate)
-        if ptype>0 and ptype<5:
-            plate = cv2.bitwise_not(plate)
+def find_edge(image):
+    sum_i = image.sum(axis=0)
+    sum_i = sum_i.astype(np.float)
+    sum_i /= image.shape[0] * 255
+    # print sum_i
+    start= 0 
+    end = image.shape[1] - 1
 
-        image_rgb = findContoursAndDrawBoundingBox(plate)
-        image_rgb = finemappingVertical(image_rgb)
-        plate_hashname = verticalMappingToFolder(image_rgb)
-        image_gray = cv2.cvtColor(image_rgb,cv2.COLOR_RGB2GRAY)
+    for i,one in enumerate(sum_i):
+        if one > 0.4:
+            start = i;
+            if start - 3 < 0:
+                start = 0
+            else:
+                start -= 3
 
-        # image_gray = horizontalSegmentation(image_gray)
-        # cv2.imshow("image_gray",image_gray)
-        # cv2.waitKey()
+            break
+    for i,one in enumerate(sum_i[::-1]):
 
-        cv2.imwrite("./tmp/"+str(j)+".jpg",image_gray)
-        # cv2.imshow("image",image_gray)
-        # cv2.waitKey(0)
-        #print("校正",time.time() - t1,"s")
-        # cv2.imshow("image,",image_gray)
-        # cv2.waitKey(0)
-        t2 = time.time()
-        val = slidingWindowsEval(image_gray)
-        # print val
-        #print("分割和识别",time.time() - t2,"s")
-        if len(val)==3:
-            blocks, res, confidence = val
-            if confidence/7>0.7:
-                image = drawRectBox(image,rect,res)
-                res_set.append(res)
-                for i,block in enumerate(blocks):
+        if one > 0.4:
+            end = end - i;
+            if end + 4 > image.shape[1] - 1:
+                end = image.shape[1] - 1
+            else:
+                end += 4
+            break
+    return start, end
 
-                    block_ = cv2.resize(block,(25,25))
-                    block_ = cv2.cvtColor(block_,cv2.COLOR_GRAY2BGR)
-                    image[j * 25:(j * 25) + 25, i * 25:(i * 25) + 25] = block_
-                    if image[j*25:(j*25)+25,i*25:(i*25)+25].shape == block_.shape:
-                        pass
-    return image,res_set
-
+#打上boundingbox和标签
 def drawRectBox(image,rect,addText):
-    cv2.rectangle(image, (int(rect[0]), int(rect[1])), (int(rect[0] + rect[2]), int(rect[1] + rect[3])), (0,0, 255), 2,cv2.LINE_AA)
-    cv2.rectangle(image, (int(rect[0]-1), int(rect[1])-16), (int(rect[0] + 80), int(rect[1])), (0, 0, 255), -1,
-                  cv2.LINE_AA)
+    cv2.rectangle(image, (int(rect[0]), int(rect[1])), (int(rect[0] + rect[2]), int(rect[1] + rect[3])), (0,0, 255), 2,cv2.cv.CV_AA)
+    cv2.rectangle(image, (int(rect[0]-1), int(rect[1])-16), (int(rect[0] + 80), int(rect[1])), (0, 0, 255), -1, cv2.cv.CV_AA)
 
     img = Image.fromarray(image)
     draw = ImageDraw.Draw(img)
-    draw.text((int(rect[0]+1), int(rect[1]-16)), addText.encode('utf-8').decode(encoding="utf-8"), (255, 255, 255), font=fontC)
+    draw.text((int(rect[0]+1), int(rect[1]-16)), addText.decode("utf-8"), (255, 255, 255), font=fontC)
     imagex = np.array(img)
 
     return imagex
 
+#垂直边缘检测
+def verticalEdgeDetection(image):
+    image_sobel = cv2.Sobel(image.copy(),cv2.CV_8U,1,0)
+    flag,thres = cv2.threshold(image_sobel,0,255,cv2.THRESH_OTSU|cv2.THRESH_BINARY)
+    flag,thres = cv2.threshold(image_sobel,int(flag*0.7),255,cv2.THRESH_BINARY)
+    kernal = np.ones(shape=(3,15))
+    thres = cv2.morphologyEx(thres,cv2.MORPH_CLOSE,kernal)
+
+    return thres
+
+#确定粗略的左右边界
+def horizontalSegmentation(image):
+    thres = verticalEdgeDetection(image)
+    head,tail = find_edge(thres)
+    tail = tail+5
+    if tail>135:
+        tail = 135
+    image = image[0:35,head:tail]
+    image = cv2.resize(image, (int(136), int(36)))
+    return image
+
+# 返回最有可能的车牌号
+def SimpleRecognizePlate(image):
+    images = detectPlateRough(image, image.shape[0], top_bottom_padding_rate=0.1) # 车牌的粗定位
+    # res_set = []
+    max_confidence = 0
+    res_out = ''
+    for j,plate in enumerate(images):
+        plate, rect, origin_plate  = plate
+        # plate = cv2.cvtColor(plate, cv2.COLOR_RGB2GRAY)
+        plate = cv2.resize(plate, (136 ,36 * 2))
+        ptype = td_SimplePredict(plate)
+        if ptype > 0 and ptype < 5:
+            plate = cv2.bitwise_not(plate)
+        image_rgb = fm_findContoursAndDrawBoundingBox(plate)
+        image_rgb = fv_finemappingVertical(image_rgb)
+        # plate_hashname = verticalMappingToFolder(image_rgb)
+        image_gray = cv2.cvtColor(image_rgb,cv2.COLOR_RGB2GRAY)
+        val = slidingWindowsEval(image_gray)
+        if len(val) == 3:
+            blocks, res, confidence = val
+            if confidence/7 > 0.7:
+                # image = drawRectBox(image, rect, res)
+                if confidence > max_confidence:
+                    max_confidence = confidence
+                    res_out = res
+                # res_set.append(res)
+    return res_out
+
+def RecognizePlateJson(image):    
+    images = detectPlateRough(image,image.shape[0],top_bottom_padding_rate=0.1)
+    # jsons = []
+    max_confidence = 0
+    res_out = {}
+    for j, plate in enumerate(images):
+        plate, rect, origin_plate = plate
+        # cv2.imwrite(str(j)+"_rough.jpg",plate)
+        # print "车牌类型:",ptype
+        # plate = cv2.cvtColor(plate, cv2.COLOR_RGB2GRAY)
+        plate = cv2.resize(plate,(136,int(36*2.5)))
+        # 车牌类型识别
+        ptype = td_SimplePredict(plate)
+        if ptype > 0 and ptype < 5:
+            plate = cv2.bitwise_not(plate)
+        # demo = verticalEdgeDetection(plate)
+        image_rgb = fm_findContoursAndDrawBoundingBox(plate)
+        image_rgb = fv_finemappingVertical(image_rgb)
+        # image_hash_name = verticalMappingToFolder(image_rgb)
+        # print time.time() - t1,"校正"
+        image_gray = cv2.cvtColor(image_rgb,cv2.COLOR_BGR2GRAY)
+        # cv2.imwrite(str(j)+".jpg",image_gray)
+        # image_gray = horizontalSegmentation(image_gray)
+        val = slidingWindowsEval(image_gray)
+        if len(val) == 3:
+            blocks, res, confidence = val
+            plate_name = res
+            res_json = {}
+            if confidence/7 > 0.0:
+                res_json["Name"] = plate_name
+                # print plate_name
+                res_json["Type"] = plateType[ptype]
+                res_json["Confidence"] = confidence/7
+                res_json["x"] = int(rect[0])
+                res_json["y"] = int(rect[1])
+                res_json["w"] = int(rect[2])
+                res_json["h"] = int(rect[3])
+                if confidence > max_confidence:
+                    res_out = res_json
+    return res_out
+
+
+# segmentation
 import scipy.ndimage.filters as f
 import scipy
-
-import time
 import scipy.signal as l
-
-
-
-
-
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, Activation, Flatten
-from keras.layers import Convolution2D, MaxPooling2D
+from keras.layers import Conv2D, MaxPool2D
 from keras.optimizers import SGD
 from keras import backend as K
-
 K.set_image_dim_ordering('tf')
 
 
@@ -97,20 +164,14 @@ def Getmodel_tensorflow(nb_classes):
     nb_pool = 2
     # convolution kernel size
     nb_conv = 3
-    # x = np.load('x.npy')
-    # y = np_utils.to_categorical(range(3062)*45*5*2, nb_classes)
-    # weight = ((type_class - np.arange(type_class)) / type_class + 1) ** 3
-    # weight = dict(zip(range(3063), weight / weight.mean()))  # 调整权重，高频字优先
 
     model = Sequential()
-    model.add(Convolution2D(nb_filters, nb_conv, nb_conv,
-                            border_mode='valid',
-                            input_shape=(img_rows, img_cols,1)))
+    model.add(Conv2D(nb_filters, (nb_conv, nb_conv),input_shape=(img_rows, img_cols,1)))
     model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
-    model.add(Convolution2D(nb_filters, nb_conv, nb_conv))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
+    model.add(Conv2D(nb_filters, (nb_conv, nb_conv)))
     model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
     model.add(Flatten())
     model.add(Dense(256))
     model.add(Dropout(0.5))
@@ -122,8 +183,6 @@ def Getmodel_tensorflow(nb_classes):
                   optimizer='sgd',
                   metrics=['accuracy'])
     return model
-
-
 
 def Getmodel_tensorflow_light(nb_classes):
     # nb_classes = len(charset)
@@ -140,14 +199,12 @@ def Getmodel_tensorflow_light(nb_classes):
     # weight = dict(zip(range(3063), weight / weight.mean()))  # 调整权重，高频字优先
 
     model = Sequential()
-    model.add(Convolution2D(nb_filters, nb_conv, nb_conv,
-                            border_mode='valid',
-                            input_shape=(img_rows, img_cols, 1)))
+    model.add(Conv2D(nb_filters, (nb_conv, nb_conv),input_shape=(img_rows, img_cols, 1)))
     model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
-    model.add(Convolution2D(nb_filters, nb_conv * 2, nb_conv * 2))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
+    model.add(Conv2D(nb_filters, (nb_conv * 2, nb_conv * 2)))
     model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
     model.add(Flatten())
     model.add(Dense(32))
     # model.add(Dropout(0.25))
@@ -160,50 +217,40 @@ def Getmodel_tensorflow_light(nb_classes):
                   metrics=['accuracy'])
     return model
 
+seg_model = Getmodel_tensorflow_light(3)
+seg_model2  = Getmodel_tensorflow(3)
 
+seg_model.load_weights("char_judgement1.h5")
+seg_model2.load_weights("char_judgement.h5")
+seg_model = seg_model2
 
-
-modelseg  = Getmodel_tensorflow_light(3)
-model2seg  = Getmodel_tensorflow(3)
-
-import os
-# model.load_weights("char_judgement1.h5")
-modelseg.load_weights('char_judgement1.h5')
-model2seg.load_weights('char_judgement.h5')
-
-
-modelseg = model2seg
 def get_median(data):
     data = sorted(data)
     size = len(data)
     # print size
     # 判断列表长度为偶数
-    if size % 2 == 0: 
-        median = (data[size//2]+data[size//2-1])/2
+    if size % 2 == 0:
+        median = (data[size//2] + data[size//2 - 1])/2
         data[0] = median
     # 判断列表长度为奇数
     if size % 2 == 1:
         median = data[(size-1)//2]
         data[0] = median
     return data[0]
-import time
+
 def searchOptimalCuttingPoint(rgb,res_map,start,width_boundingbox,interval_range):
-    t0  = time.time()
-    #
-    # for x in xrange(10):
-    #     res_map = np.vstack((res_map,res_map[-1]))
     length = res_map.shape[0]
-    refine_s = -2;
+    refine_s = -2
 
     if width_boundingbox>20:
         refine_s = -9
     score_list = []
     interval_big = int(width_boundingbox * 0.3)  #
     p = 0
-    for zero_add in range(start,start+50,3):
+    for zero_add in xrange(start,start+50,3):
         # for interval_small in xrange(-0,width_boundingbox/2):
-            for i in range(-8,int(width_boundingbox/1)-8):
-                for refine in range(refine_s,int(width_boundingbox/2+3)):
+            for i in xrange(-8,int(width_boundingbox/1)-8):
+                for refine in xrange(refine_s,width_boundingbox/2+3):
                     p1 = zero_add# this point is province
                     p2 = p1 + width_boundingbox +refine #
                     p3 = p2 + width_boundingbox + interval_big+i+1
@@ -211,51 +258,33 @@ def searchOptimalCuttingPoint(rgb,res_map,start,width_boundingbox,interval_range
                     p5 = p4 + width_boundingbox +refine
                     p6 = p5 + width_boundingbox +refine
                     p7 = p6 + width_boundingbox +refine
-                    if p7>=length:
+                    if p7 >= length:
                         continue
-                    p1, p2, p3,p4,p5,p6,p7 = int(p1),int(p2),int(p3),int(p4),int(p5),int(p6),int(p7)
                     score = res_map[p1][2]*3 -(res_map[p3][1]+res_map[p4][1]+res_map[p5][1]+res_map[p6][1]+res_map[p7][1])+7
                     # print score
                     score_list.append([score,[p1,p2,p3,p4,p5,p6,p7]])
-                    p+=1
-    # print(p)
+                    p += 1
 
     score_list = sorted(score_list , key=lambda x:x[0])
-    # for one in score_list[-1][1]:
-    #     cv2.line(debug,(one,0),(one,36),(255,0,0),1)
-    # #
-    # cv2.imshow("one",debug)
-    # cv2.waitKey(0)
-    #
-    # print("寻找最佳点",time.time()-t0)
     return score_list[-1]
 
-
-sys.path.append('../')
 from skimage.filters import (threshold_otsu, threshold_niblack,
                              threshold_sauvola)
 
 def refineCrop(sections,width=16):
     new_sections = []
     for section in sections:
-        # cv2.imshow("section¡",section)
-
-        # cv2.blur(section,(3,3),3)
-
         sec_center = np.array([section.shape[1]/2,section.shape[0]/2])
         binary_niblack = niBlackThreshold(section,17,-0.255)
-        imagex, contours, hierarchy  = cv2.findContours(binary_niblack,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        contours, hierarchy  = cv2.findContours(binary_niblack,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
         boxs = []
         for contour in contours:
             x,y,w,h = cv2.boundingRect(contour)
-
-            ratio = w/float(h)
-            if ratio<1 and h>36*0.4 and y<16:
+            ratio = w / float(h)
+            if ratio < 1 and h > 36 * 0.4 and y < 16:
                 box = [x,y,w,h]
-
-                boxs.append([box,np.array([x+w/2,y+h/2])])
-
-        dis_ = np.array([ ((one[1]-sec_center)**2).sum() for one in boxs])
+                boxs.append([box,np.array([x + w/2, y + h/2])])
+        dis_ = np.array([((one[1]-sec_center)**2).sum() for one in boxs])
         if len(dis_)==0:
             kernal = [0, 0, section.shape[1], section.shape[0]]
         else:
@@ -280,24 +309,14 @@ def refineCrop(sections,width=16):
 
             new_box[3] = h*2
 
-        section = section[int(new_box[1]):int(new_box[1]+new_box[3]), int(new_box[0]):int(new_box[0]+new_box[2])]
-        # cv2.imshow("section",section)
-        # cv2.waitKey(0)
+        section  = section[new_box[1]:new_box[1]+new_box[3],new_box[0]:new_box[0]+new_box[2]]
         new_sections.append(section)
-        # print new_box
-
-
     return new_sections
-
-
-
-
 
 def slidingWindowsEval(image):
     windows_size = 16;
     stride = 1
     height= image.shape[0]
-    t0 = time.time()
     data_sets = []
 
     for i in range(0,image.shape[1]-windows_size+1,stride):
@@ -309,15 +328,13 @@ def slidingWindowsEval(image):
         data=  np.expand_dims(data,3)
         data_sets.append(data)
 
-    res = modelseg.predict(np.array(data_sets))
-    # print("分割",time.time() - t0)
-
+    res = seg_model.predict(np.array(data_sets))
     pin = res
-    p = 1 -  (res.T)[1]
+    p = 1 - (res.T)[1]
     p = f.gaussian_filter1d(np.array(p,dtype=np.float),3)
     lmin = l.argrelmax(np.array(p),order = 3)[0]
     interval = []
-    for i in range(len(lmin)-1):
+    for i in xrange(len(lmin)-1):
         interval.append(lmin[i+1]-lmin[i])
 
     if(len(interval)>3):
@@ -336,7 +353,7 @@ def slidingWindowsEval(image):
     name = ""
     confidence =0.00
     seg_block = []
-    for x in range(1,len(cutting_pts)):
+    for x in xrange(1,len(cutting_pts)):
         if x != len(cutting_pts)-1 and x!=1:
             section = image[0:36,cutting_pts[x-1]-2:cutting_pts[x]+2]
         elif  x==1:
@@ -351,56 +368,32 @@ def slidingWindowsEval(image):
             c_head = cutting_pts[x - 1]
             c_tail = cutting_pts[x]
             if diff<7 :
-                section = image[0:36, int(c_head-5):int(c_tail+5)]
+                section = image[0:36, c_head-5:c_tail+5]
             else:
                 diff-=1
-                section = image[0:36, int(c_head - diff):int(c_tail + diff)]
+                section = image[0:36, c_head - diff:c_tail + diff]
         elif  x==2:
-            section = image[0:36, int(cutting_pts[x - 1] - 3):int(cutting_pts[x-1]+ mid)]
+            section = image[0:36, cutting_pts[x - 1] - 3:cutting_pts[x-1]+ mid]
         else:
-            section = image[0:36,int(cutting_pts[x-1]):int(cutting_pts[x])]
+            section = image[0:36,cutting_pts[x-1]:cutting_pts[x]]
         seg_block.append(section)
     refined = refineCrop(seg_block,mid-1)
 
-    t0 = time.time()
     for i,one in enumerate(refined):
-        res_pre = cRP_SimplePredict(one, i )
-        # cv2.imshow(str(i),one)
-        # cv2.waitKey(0)
+        res_pre = cRP_SimplePredict(one, i)
         confidence+=res_pre[0]
         name+= res_pre[1]
-    # print("字符识别",time.time() - t0)
-
     return refined,name,confidence
 
-from skimage.filters import (threshold_otsu, threshold_niblack,
-                             threshold_sauvola)
 
-
-def niBlackThreshold(  src,  blockSize,  k,  binarizationMethod=0):
-    mean = cv2.boxFilter(src,cv2.CV_32F,(blockSize, blockSize),borderType=cv2.BORDER_REPLICATE)
-    sqmean = cv2.sqrBoxFilter(src, cv2.CV_32F, (blockSize, blockSize), borderType = cv2.BORDER_REPLICATE)
-    variance = sqmean - (mean*mean)
-    stddev  = np.sqrt(variance)
-    thresh = mean + stddev * float(-k)
-    thresh = thresh.astype(src.dtype)
-    k = (src>thresh)*255
-    k = k.astype(np.uint8)
-    return k
-
-
+# recognizer
 from keras.models import Sequential
 from keras.layers import Dense, Dropout, Activation, Flatten
-from keras.layers import Convolution2D, MaxPooling2D
+from keras.layers import Conv2D,MaxPool2D
 from keras.optimizers import SGD
 from keras import backend as K
 
 K.set_image_dim_ordering('tf')
-
-
-import cv2
-import numpy as np
-
 
 
 index = {u"京": 0, u"沪": 1, u"津": 2, u"渝": 3, u"冀": 4, u"晋": 5, u"蒙": 6, u"辽": 7, u"吉": 8, u"黑": 9, u"苏": 10, u"浙": 11, u"皖": 12,
@@ -414,8 +407,7 @@ chars = ["京", "沪", "津", "渝", "冀", "晋", "蒙", "辽", "吉", "黑", "
              "琼", "川", "贵", "云", "藏", "陕", "甘", "青", "宁", "新", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "A",
              "B", "C", "D", "E", "F", "G", "H", "J", "K", "L", "M", "N", "P",
          "Q", "R", "S", "T", "U", "V", "W", "X",
-             "Y", "Z","港","学","O","使","警","澳","挂"];
-
+             "Y", "Z","港","学","O","使","警","澳","挂" ];
 
 
 def Getmodel_tensorflow(nb_classes):
@@ -436,17 +428,15 @@ def Getmodel_tensorflow(nb_classes):
     # weight = dict(zip(range(3063), weight / weight.mean()))  # 调整权重，高频字优先
 
     model = Sequential()
-    model.add(Convolution2D(32, 5, 5,
-                            border_mode='valid',
-                            input_shape=(img_rows, img_cols,1)))
+    model.add(Conv2D(32, (5, 5),input_shape=(img_rows, img_cols,1)))
     model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
     model.add(Dropout(0.25))
-    model.add(Convolution2D(32, 3, 3))
+    model.add(Conv2D(32, (3, 3)))
     model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
     model.add(Dropout(0.25))
-    model.add(Convolution2D(512, 3, 3))
+    model.add(Conv2D(512, (3, 3)))
     # model.add(Activation('relu'))
     # model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
     # model.add(Dropout(0.25))
@@ -460,9 +450,6 @@ def Getmodel_tensorflow(nb_classes):
                   optimizer='adam',
                   metrics=['accuracy'])
     return model
-
-
-
 
 def Getmodel_ch(nb_classes):
     # nb_classes = len(charset)
@@ -481,17 +468,15 @@ def Getmodel_ch(nb_classes):
     # weight = dict(zip(range(3063), weight / weight.mean()))  # 调整权重，高频字优先
 
     model = Sequential()
-    model.add(Convolution2D(32, 5, 5,
-                            border_mode='valid',
-                            input_shape=(img_rows, img_cols,1)))
+    model.add(Conv2D(32, (5, 5),input_shape=(img_rows, img_cols,1)))
     model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
     model.add(Dropout(0.25))
-    model.add(Convolution2D(32, 3, 3))
+    model.add(Conv2D(32, (3, 3)))
     model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
     model.add(Dropout(0.25))
-    model.add(Convolution2D(512, 3, 3))
+    model.add(Conv2D(512, (3, 3)))
     # model.add(Activation('relu'))
     # model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
     # model.add(Dropout(0.25))
@@ -506,16 +491,10 @@ def Getmodel_ch(nb_classes):
                   metrics=['accuracy'])
     return model
 
-
-
-modelrec  = Getmodel_tensorflow(65)
-#构建网络
-
-model_chrec = Getmodel_ch(31)
-
-model_chrec.load_weights('char_chi_sim.h5')
-modelrec.load_weights("char_rec.h5")
-
+rec_model  = Getmodel_tensorflow(65)
+rec_model_ch = Getmodel_ch(31)
+rec_model_ch.load_weights("char_chi_sim.h5")
+rec_model.load_weights("char_rec.h5")
 
 def cRP_SimplePredict(image,pos):
     image = cv2.resize(image, (23, 23))
@@ -524,9 +503,9 @@ def cRP_SimplePredict(image,pos):
     image -= image.mean()
     image = np.expand_dims(image, 3)
     if pos!=0:
-        res = np.array(modelrec.predict(np.array([image]))[0])
+        res = np.array(rec_model.predict(np.array([image]))[0])
     else:
-        res = np.array(model_chrec.predict(np.array([image]))[0])
+        res = np.array(rec_model_ch.predict(np.array([image]))[0])
 
     zero_add = 0 ;
 
@@ -542,77 +521,165 @@ def cRP_SimplePredict(image,pos):
     max_id = res.argmax()
 
 
-    return res.max(),chars[int(max_id+zero_add)],max_id+zero_add
+    return res.max(),chars[max_id+zero_add],max_id+zero_add
 
 
+# niblack_thresholding
+def niBlackThreshold(  src,  blockSize,  k,  binarizationMethod= 0 ):
+    mean = cv2.boxFilter(src,cv2.CV_32F,(blockSize, blockSize),borderType=cv2.BORDER_REPLICATE)
+    # sqmean = cv2.sqrBoxFilter(src, cv2.CV_32F, (blockSize, blockSize), borderType = cv2.BORDER_REPLICATE)
+    sqmean = mean*mean
+    variance = sqmean - (mean*mean)
+    stddev  = np.sqrt(variance)
+    thresh = mean + stddev * float(-k)
+    thresh = thresh.astype(src.dtype)
+    k = (src>thresh)*255
+    k = k.astype(np.uint8)
+    return k
+
+# cache
 import hashlib
-
 def verticalMappingToFolder(image):
     name = hashlib.md5(image.data).hexdigest()[:8]
-    # print(name)
-    cv2.imwrite("./tmp/"+name+".png",image)
+    # print name
+
+    # cv2.imwrite(name+".png",image)
     return name
 
 
-from keras.layers import Conv2D, Input,MaxPool2D, Reshape,Activation,Flatten, Dense
-from keras.models import Model, Sequential
-from keras.layers.advanced_activations import PReLU
-from keras.optimizers import adam
-import numpy as np
+# detect
+watch_cascade = cv2.CascadeClassifier('cascade.xml')
+def computeSafeRegion(shape,bounding_rect):
+    top = bounding_rect[1] # y
+    bottom  = bounding_rect[1] + bounding_rect[3] # y +  h
+    left = bounding_rect[0] # x
+    right =   bounding_rect[0] + bounding_rect[2] # x +  w
 
-import cv2
+    min_top = 0
+    max_bottom = shape[0]
+    min_left = 0
+    max_right = shape[1]
 
-def getModel():
+    if top < min_top:
+        top = min_top
+    if left < min_left:
+        left = min_left
+
+    if bottom > max_bottom:
+        bottom = max_bottom
+    if right > max_right:
+        right = max_right
+    return [left,top,right-left,bottom-top]
+
+def cropped_from_image(image,rect):
+    x, y, w, h = computeSafeRegion(image.shape,rect)
+    return image[y:y+h,x:x+w]
+
+# Extend检测车牌的大致区域
+def detectPlateRough(image_gray,resize_h = 720,en_scale =1.08 ,top_bottom_padding_rate = 0.05):
+    # print image_gray.shape
+
+    if top_bottom_padding_rate>0.2:
+        # print "error:top_bottom_padding_rate > 0.2:",top_bottom_padding_rate
+        exit(1)
+
+    height = image_gray.shape[0]
+    padding = int(height*top_bottom_padding_rate)
+    scale = image_gray.shape[1]/float(image_gray.shape[0])
+
+    image = cv2.resize(image_gray, (int(scale*resize_h), resize_h))
+
+    image_color_cropped = image[padding:resize_h-padding,0:image_gray.shape[1]]
+
+    image_gray = cv2.cvtColor(image_color_cropped,cv2.COLOR_RGB2GRAY)
+    # 使用Haar Cascade 检测车牌
+    watches = watch_cascade.detectMultiScale(image_gray, en_scale, 2, minSize=(36, 9),maxSize=(36*40, 9*40))
+
+    cropped_images = []
+    for (x, y, w, h) in watches:
+        cropped_origin = cropped_from_image(image_color_cropped, (int(x), int(y), int(w), int(h)))
+        x -= w * 0.14
+        w += w * 0.28
+        y -= h * 0.6
+        h += h * 1.1;
+
+        cropped = cropped_from_image(image_color_cropped, (int(x), int(y), int(w), int(h)))
+        cropped_images.append([cropped,[x, y+padding, w, h],cropped_origin])
+    return cropped_images
 
 
-    input = Input(shape=[12, 50, 3])  # change this shape to [None,None,3] to enable arbitraty shape input
-    x = Conv2D(10, (3, 3), strides=1, padding='valid', name='conv1')(input)
-    x = PReLU(shared_axes=[1, 2], name='prelu1')(x)
-    x = MaxPool2D(pool_size=2)(x)
-    x = Conv2D(16, (3, 3), strides=1, padding='valid', name='conv2')(x)
-    x = PReLU(shared_axes=[1, 2], name='prelu2')(x)
-    x = Conv2D(32, (3, 3), strides=1, padding='valid', name='conv3')(x)
-    x = PReLU(shared_axes=[1, 2], name='prelu3')(x)
-    x = Flatten()(x)
-    output = Dense(2)(x)
-    output = PReLU(name='prelu4')(output)
-    model = Model([input], [output])
+# typeDistinguish
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, Activation, Flatten
+from keras.layers import Conv2D, MaxPool2D
+from keras.optimizers import SGD
+from keras import backend as K
+
+K.set_image_dim_ordering('tf')
+
+
+plateType  = [u"蓝牌",u"单层黄牌",u"新能源车牌",u"白色",u"黑色-港澳"]
+def Getmodel_tensorflow(nb_classes):
+    # nb_classes = len(charset)
+
+    img_rows, img_cols = 9, 34
+    # number of convolutional filters to use
+    nb_filters = 32
+    # size of pooling area for max pooling
+    nb_pool = 2
+    # convolution kernel size
+    nb_conv = 3
+
+    # x = np.load('x.npy')
+    # y = np_utils.to_categorical(range(3062)*45*5*2, nb_classes)
+    # weight = ((type_class - np.arange(type_class)) / type_class + 1) ** 3
+    # weight = dict(zip(range(3063), weight / weight.mean()))  # 调整权重，高频字优先
+
+    model = Sequential()
+    model.add(Conv2D(16, (5, 5),input_shape=(img_rows, img_cols,3)))
+    model.add(Activation('relu'))
+    model.add(MaxPool2D(pool_size=(nb_pool, nb_pool)))
+    model.add(Flatten())
+    model.add(Dense(64))
+    model.add(Activation('relu'))
+    model.add(Dropout(0.5))
+    model.add(Dense(nb_classes))
+    model.add(Activation('softmax'))
+    model.compile(loss='categorical_crossentropy',
+                  optimizer='adam',
+                  metrics=['accuracy'])
     return model
 
-modelv = getModel()
-modelv.load_weights("model12.h5")
+td_model = Getmodel_tensorflow(5)
+td_model.load_weights("plate_type.h5")
+td_model.save("plate_type.h5")
+
+def td_SimplePredict(image):
+    image = cv2.resize(image, (34, 9))
+    image = image.astype(np.float) / 255
+    res = np.array(td_model.predict(np.array([image]))[0])
+    return res.argmax()
 
 
-def finemappingVertical(image):
-    resized = cv2.resize(image,(50,12))
-    resized = resized.astype(np.float)/255
-    res= modelv.predict(np.array([resized]))[0]
-    res  =res*image.shape[1]
-    res = res.astype(np.int)
-    image = image[0:35,res[0]+4:res[1]]
-    image = cv2.resize(image, (int(136), int(36)))
-    return image
+# finemapping
+from skimage.filters import (threshold_otsu, threshold_niblack,
+                             threshold_sauvola)
 
-
-def fitLine_ransac(pts,zero_add = 0 ):
+def fitLine_ransac(pts,zero_add = 0):
     if len(pts)>=2:
-        [vx, vy, x, y] = cv2.fitLine(pts, cv2.DIST_HUBER, 0, 0.01, 0.01)
+        [vx, vy, x, y] = cv2.fitLine(pts, distType=cv2.cv.CV_DIST_HUBER, param=0, reps=0.01, aeps=0.01)
         lefty = int((-x * vy / vx) + y)
         righty = int(((136- x) * vy / vx) + y)
         return lefty+30+zero_add,righty+30+zero_add
     return 0,0
 
 #精定位算法
-def findContoursAndDrawBoundingBox(image_rgb):
-
-
+def fm_findContoursAndDrawBoundingBox(image_rgb):
     line_upper  = [];
     line_lower = [];
-
     line_experiment = []
     grouped_rects = []
     gray_image = cv2.cvtColor(image_rgb,cv2.COLOR_BGR2GRAY)
-
     # for k in np.linspace(-1.5, -0.2,10):
     for k in np.linspace(-50, 0, 15):
 
@@ -623,7 +690,7 @@ def findContoursAndDrawBoundingBox(image_rgb):
         binary_niblack = cv2.adaptiveThreshold(gray_image,255,cv2.ADAPTIVE_THRESH_MEAN_C,cv2.THRESH_BINARY,17,k)
         # cv2.imshow("image1",binary_niblack)
         # cv2.waitKey(0)
-        imagex, contours, hierarchy = cv2.findContours(binary_niblack.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        contours, hierarchy = cv2.findContours(binary_niblack.copy(),cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
         for contour in contours:
             bdbox = cv2.boundingRect(contour)
             if (bdbox[3]/float(bdbox[2])>0.7 and bdbox[3]*bdbox[2]>100 and bdbox[3]*bdbox[2]<1200) or (bdbox[3]/float(bdbox[2])>3 and bdbox[3]*bdbox[2]<100):
@@ -650,57 +717,73 @@ def findContoursAndDrawBoundingBox(image_rgb):
     pts_map2 = np.float32([[136,36],[0,36],[136,0],[0,0]])
     mat = cv2.getPerspectiveTransform(pts_map1,pts_map2)
     image = cv2.warpPerspective(rgb,mat,(136,36),flags=cv2.INTER_CUBIC)
-    image = fastDeskew(image)
+    image,M = fastDeskew(image)
 
     return image
 
 
-import math
+# finemapping_vertical
+from keras.layers import Conv2D, Input,MaxPool2D, Reshape,Activation,Flatten, Dense
+from keras.models import Model, Sequential
+from keras.layers.advanced_activations import PReLU
+from keras.optimizers import adam
 
+def getModel():
+    input = Input(shape=[12, 50, 3])  # change this shape to [None,None,3] to enable arbitraty shape input
+    x = Conv2D(10, (3, 3), strides=1, padding='valid', name='conv1')(input)
+    x = PReLU(shared_axes=[1, 2], name='prelu1')(x)
+    x = MaxPool2D(pool_size=2)(x)
+    x = Conv2D(16, (3, 3), strides=1, padding='valid', name='conv2')(x)
+    x = PReLU(shared_axes=[1, 2], name='prelu2')(x)
+    x = Conv2D(32, (3, 3), strides=1, padding='valid', name='conv3')(x)
+    x = PReLU(shared_axes=[1, 2], name='prelu3')(x)
+    x = Flatten()(x)
+    output = Dense(2)(x)
+    output = PReLU(name='prelu4')(output)
+    model = Model([input], [output])
+    return model
+
+fv_model = getModel()
+fv_model.load_weights("model12.h5")
+
+def fv_finemappingVertical(image):
+    resized = cv2.resize(image,(50,12))
+    resized = resized.astype(np.float)/255
+    res= fv_model.predict(np.array([resized]))[0]
+    res  =res*image.shape[1]
+    res = res.astype(np.int)
+    image = image[0:35,res[0]+4:res[1]]
+    image = cv2.resize(image, (int(136), int(36)))
+    return image
+
+
+# deskew
+
+import math
 from scipy.ndimage import filters
 
 
 def angle(x,y):
-    return int(math.atan2(float(y),float(x))*180.0/3.1415);
-
-def h_rot(src, angle, scale=1.):
-    w = src.shape[1]
-    h = src.shape[0]
-    rangle = np.deg2rad(angle)
-    nw = (abs(np.sin(rangle)*h) + abs(np.cos(rangle)*w))*scale
-    nh = (abs(np.cos(rangle)*h) + abs(np.sin(rangle)*w))*scale
-
-    rot_mat = cv2.getRotationMatrix2D((nw*0.5, nh*0.5), angle, scale)
-
-    rot_move = np.dot(rot_mat, np.array([(nw-w)*0.5, (nh-h)*0.5,0]))
-
-    rot_mat[0,2] += rot_move[0]
-    rot_mat[1,2] += rot_move[1]
-    return cv2.warpAffine(src, rot_mat, (int(math.ceil(nw)), int(math.ceil(nh))), flags=cv2.INTER_LANCZOS4)
+    return int(math.atan2(float(y),float(x))*180.0/3.1415)
 
 def v_rot(img,angel,shape,max_angel):
-
     size_o = [shape[1],shape[0]]
-
     size = (shape[1]+ int(shape[0]*np.cos((float(max_angel )/180) * 3.14)),shape[0])
-
-
     interval = abs( int( np.sin((float(angel) /180) * 3.14)* shape[0]));
 
-    pts1 = np.float32([[0,0]         ,[0,size_o[1]],[size_o[0],0],[size_o[0],size_o[1]]])
+    pts1 = np.float32([[0,0],[0,size_o[1]],[size_o[0],0],[size_o[0],size_o[1]]])
     if(angel>0):
-
         pts2 = np.float32([[interval,0],[0,size[1]  ],[size[0],0  ],[size[0]-interval,size_o[1]]])
     else:
         pts2 = np.float32([[0,0],[interval,size[1]  ],[size[0]-interval,0  ],[size[0],size_o[1]]])
 
     M  = cv2.getPerspectiveTransform(pts1,pts2);
     dst = cv2.warpPerspective(img,M,size);
-    return dst
+    return dst,M;
 
 def skew_detection(image_gray):
     h, w = image_gray.shape[:2]
-    eigen = cv2.cornerEigenValsAndVecs(image_gray,12, 5) # 计算图像块的特征值和特征向量用于角点检测
+    eigen = cv2.cornerEigenValsAndVecs(image_gray,12, 5)
     angle_sur = np.zeros(180,np.uint);
     eigen = eigen.reshape(h, w, 3, 2)
     flow = eigen[:,:,2]
@@ -708,12 +791,8 @@ def skew_detection(image_gray):
     vis[:] = (192 + np.uint32(vis)) / 2
     d = 12
     points =  np.dstack( np.mgrid[d/2:w:d, d/2:h:d] ).reshape(-1, 2)
-    # print(points)
     for x, y in points:
-        x, y = int(x), int(y)
-        # print(flow[y, x]*d)
         vx, vy = np.int32(flow[y, x]*d)
-        # cv2.line(rgb, (x-vx, y-vy), (x+vx, y+vy), (0, 355, 0), 1, cv2.LINE_AA)
         ang = angle(vx,vy);
         angle_sur[(ang+180)%180] +=1;
     # torr_bin = 30
@@ -735,220 +814,6 @@ def skew_detection(image_gray):
 def fastDeskew(image):
     image_gray = cv2.cvtColor(image,cv2.COLOR_BGR2GRAY)
     skew_h,skew_v = skew_detection(image_gray)
+    deskew,M = v_rot(image,int((90-skew_v)*1.5),image.shape,60)
+    return deskew,M
 
-    # print("校正角度 h ",skew_h,"v",skew_v)
-
-    deskew = v_rot(image,int((90-skew_v)*1.5),image.shape,60)
-    return deskew
-
-from keras.models import Sequential
-from keras.layers import Dense, Dropout, Activation, Flatten
-from keras.layers import Convolution2D, MaxPooling2D
-from keras.optimizers import SGD
-from keras import backend as K
-
-K.set_image_dim_ordering('tf')
-
-
-import cv2
-import numpy as np
-
-
-plateType  = [u"蓝牌",u"单层黄牌",u"新能源车牌",u"白色",u"黑色-港澳"]
-def Getmodel_tensorflow(nb_classes):
-    # nb_classes = len(charset)
-
-    img_rows, img_cols = 9, 34
-    # number of convolutional filters to use
-    nb_filters = 32
-    # size of pooling area for max pooling
-    nb_pool = 2
-    # convolution kernel size
-    nb_conv = 3
-
-    # x = np.load('x.npy')
-    # y = np_utils.to_categorical(range(3062)*45*5*2, nb_classes)
-    # weight = ((type_class - np.arange(type_class)) / type_class + 1) ** 3
-    # weight = dict(zip(range(3063), weight / weight.mean()))  # 调整权重，高频字优先
-
-    model = Sequential()
-    model.add(Convolution2D(16, 5, 5,
-                            border_mode='valid',
-                            input_shape=(img_rows, img_cols,3)))
-    model.add(Activation('relu'))
-    model.add(MaxPooling2D(pool_size=(nb_pool, nb_pool)))
-    model.add(Flatten())
-    model.add(Dense(64))
-    model.add(Activation('relu'))
-    model.add(Dropout(0.5))
-    model.add(Dense(nb_classes))
-    model.add(Activation('softmax'))
-    model.compile(loss='categorical_crossentropy',
-                  optimizer='adam',
-                  metrics=['accuracy'])
-    return model
-
-model = Getmodel_tensorflow(5)
-model.load_weights("plate_type.h5")
-def td_SimplePredict(image):
-    image = cv2.resize(image, (34, 9))
-    image = image.astype(np.float) / 255
-    res = np.array(model.predict(np.array([image]))[0])
-    return res.argmax()
-
-
-watch_cascade = cv2.CascadeClassifier('cascade.xml')
-
-def computeSafeRegion(shape,bounding_rect):
-    top = bounding_rect[1] # y
-    bottom  = bounding_rect[1] + bounding_rect[3] # y +  h
-    left = bounding_rect[0] # x
-    right =   bounding_rect[0] + bounding_rect[2] # x +  w
-
-    min_top = 0
-    max_bottom = shape[0]
-    min_left = 0
-    max_right = shape[1]
-
-    # print "computeSateRegion input shape",shape
-    if top < min_top:
-        top = min_top
-        # print "tap top 0"
-    if left < min_left:
-        left = min_left
-        # print "tap left 0"
-
-    if bottom > max_bottom:
-        bottom = max_bottom
-        #print "tap max_bottom max"
-    if right > max_right:
-        right = max_right
-        #print "tap max_right max"
-
-    # print "corr",left,top,right,bottom
-    return [left,top,right-left,bottom-top]
-
-
-def cropped_from_image(image,rect):
-    x, y, w, h = computeSafeRegion(image.shape,rect)
-    return image[y:y+h,x:x+w]
-
-
-def detectPlateRough(image_gray,resize_h = 720,en_scale =1.08 ,top_bottom_padding_rate = 0.05):
-    # print(image_gray.shape)
-
-    if top_bottom_padding_rate>0.2:
-        # print("error:top_bottom_padding_rate > 0.2:",top_bottom_padding_rate)
-        exit(1)
-
-    height = image_gray.shape[0]
-    padding = int(height*top_bottom_padding_rate)
-    scale = image_gray.shape[1]/float(image_gray.shape[0])
-
-    image = cv2.resize(image_gray, (int(scale*resize_h), resize_h))
-
-    image_color_cropped = image[padding:resize_h-padding,0:image_gray.shape[1]]
-
-    image_gray = cv2.cvtColor(image_color_cropped,cv2.COLOR_RGB2GRAY)
-
-    watches = watch_cascade.detectMultiScale(image_gray, en_scale, 2, minSize=(36, 9),maxSize=(36*40, 9*40))
-
-    cropped_images = []
-    for (x, y, w, h) in watches:
-        cropped_origin = cropped_from_image(image_color_cropped, (int(x), int(y), int(w), int(h)))
-        x -= w * 0.14
-        w += w * 0.28
-        y -= h * 0.6
-        h += h * 1.1;
-
-        cropped = cropped_from_image(image_color_cropped, (int(x), int(y), int(w), int(h)))
-
-
-        cropped_images.append([cropped,[int(x), int(y+padding), int(w), int(h)],cropped_origin])
-    return cropped_images
-
-def RecognizePlateJson(image):
-    
-    images = detectPlateRough(image,image.shape[0],top_bottom_padding_rate=0.1)
-
-    jsons = []
-
-    for j,plate in enumerate(images):
-
-
-        plate,rect,origin_plate =plate
-
-
-        cv2.imwrite("./tmp/"+str(j)+"_rough.jpg",plate)
-
-        # print "车牌类型:",ptype
-        # plate = cv2.cvtColor(plate, cv2.COLOR_RGB2GRAY)
-        plate  =cv2.resize(plate,(136,int(36*2.5)))
-        t1 = time.time()
-
-
-        ptype = td_SimplePredict(plate)
-        if ptype>0 and ptype<5:
-            plate = cv2.bitwise_not(plate)
-        # demo = verticalEdgeDetection(plate)
-
-        image_rgb = findContoursAndDrawBoundingBox(plate)
-        image_rgb = finemappingVertical(image_rgb)
-        plate_hashname = verticalMappingToFolder(image_rgb)
-        # print time.time() - t1,"校正"
-
-        image_gray = cv2.cvtColor(image_rgb,cv2.COLOR_BGR2GRAY)
-
-
-        cv2.imwrite("./tmp/"+str(j)+".jpg",image_gray)
-        # image_gray = horizontalSegmentation(image_gray)
-
-
-        t2 = time.time()
-        val = slidingWindowsEval(image_gray)
-        if len(val)==3:
-            blocks, res, confidence = val
-            if confidence/7>0.7:
-                image = drawRectBox(image,rect,res)
-            for i,block in enumerate(blocks):
-
-                block_ = cv2.resize(block,(25,25))
-                block_ = cv2.cvtColor(block_,cv2.COLOR_GRAY2BGR)
-                image[j * 25:(j * 25) + 25, i * 25:(i * 25) + 25] = block_
-                if image[j*25:(j*25)+25,i*25:(i*25)+25].shape == block_.shape:
-                    pass
-
-            plate_name =res
-            res_json = {}
-            if confidence/7>0.7:
-                res_json["Plate_Number"] = plate_name
-                res_json["Plate_Type"] = plateType[ptype]
-                res_json["Confidence"] = confidence/7;
-                res_json["Plat_x"] = int(rect[0])
-                res_json["Plat_y"] = int(rect[1])
-                res_json["Plat_w"] = int(rect[2])
-                res_json["Plat_h"] = int(rect[3])
-                # res_json["Image_path"] = plate_hashname
-                # print "车牌:",res,"置信度:",confidence/7
-                jsons.append(res_json)
-
-
-            else:
-                pass
-                # print "不确定的车牌:", res, "置信度:", confidence
-    # print(jsons)
-    # print(json.dumps(jsons,ensure_ascii=False,encoding="gb2312"))
-
-    #return json.dumps(jsons,ensure_ascii=False,encoding="gb2312")
-    return jsons
-
-
-
-
-
-def clpr(path):
-    image = cv2.imread(path)
-    plateOut = RecognizePlateJson(image)
-    for plate in plateOut:
-        plate["Image_path"] = path
-    return plateOut
