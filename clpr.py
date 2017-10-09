@@ -7,6 +7,9 @@ from PIL import ImageDraw
 import json
 
 import cv2
+import sys
+reload(sys)
+sys.setdefaultencoding("utf-8")
 
 
 # pipline
@@ -82,14 +85,14 @@ def SimpleRecognizePlate(image):
     for j,plate in enumerate(images):
         plate, rect, origin_plate  = plate
         # plate = cv2.cvtColor(plate, cv2.COLOR_RGB2GRAY)
-        plate = cv2.resize(plate, (136 ,36 * 2))
+        plate = cv2.resize(plate, (136 ,int(36 * 2.5)))
         ptype = td_SimplePredict(plate)
         if ptype > 0 and ptype < 5:
             plate = cv2.bitwise_not(plate)
         image_rgb = fm_findContoursAndDrawBoundingBox(plate)
         image_rgb = fv_finemappingVertical(image_rgb)
         # plate_hashname = verticalMappingToFolder(image_rgb)
-        image_gray = cv2.cvtColor(image_rgb,cv2.COLOR_RGB2GRAY)
+        image_gray = cv2.cvtColor(image_rgb,cv2.COLOR_BGR2GRAY)
         val = slidingWindowsEval(image_gray)
         if len(val) == 3:
             blocks, res, confidence = val
@@ -100,48 +103,6 @@ def SimpleRecognizePlate(image):
                     res_out = res
                 # res_set.append(res)
     return res_out
-
-def RecognizePlateJson(image):    
-    images = detectPlateRough(image,image.shape[0],top_bottom_padding_rate=0.1)
-    # jsons = []
-    max_confidence = 0
-    res_out = {}
-    for j, plate in enumerate(images):
-        plate, rect, origin_plate = plate
-        # cv2.imwrite(str(j)+"_rough.jpg",plate)
-        # print "车牌类型:",ptype
-        # plate = cv2.cvtColor(plate, cv2.COLOR_RGB2GRAY)
-        plate = cv2.resize(plate,(136,int(36*2.5)))
-        # 车牌类型识别
-        ptype = td_SimplePredict(plate)
-        if ptype > 0 and ptype < 5:
-            plate = cv2.bitwise_not(plate)
-        # demo = verticalEdgeDetection(plate)
-        image_rgb = fm_findContoursAndDrawBoundingBox(plate)
-        image_rgb = fv_finemappingVertical(image_rgb)
-        # image_hash_name = verticalMappingToFolder(image_rgb)
-        # print time.time() - t1,"校正"
-        image_gray = cv2.cvtColor(image_rgb,cv2.COLOR_BGR2GRAY)
-        # cv2.imwrite(str(j)+".jpg",image_gray)
-        # image_gray = horizontalSegmentation(image_gray)
-        val = slidingWindowsEval(image_gray)
-        if len(val) == 3:
-            blocks, res, confidence = val
-            plate_name = res
-            res_json = {}
-            if confidence/7 > 0.0:
-                res_json["Name"] = plate_name
-                # print plate_name
-                res_json["Type"] = plateType[ptype]
-                res_json["Confidence"] = confidence/7
-                res_json["x"] = int(rect[0])
-                res_json["y"] = int(rect[1])
-                res_json["w"] = int(rect[2])
-                res_json["h"] = int(rect[3])
-                if confidence > max_confidence:
-                    res_out = res_json
-    return res_out
-
 
 # segmentation
 import scipy.ndimage.filters as f
@@ -816,4 +777,3 @@ def fastDeskew(image):
     skew_h,skew_v = skew_detection(image_gray)
     deskew,M = v_rot(image,int((90-skew_v)*1.5),image.shape,60)
     return deskew,M
-
